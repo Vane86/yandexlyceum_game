@@ -3,6 +3,7 @@ from itertools import product
 from PIL import Image
 
 import os
+import math
 
 DISPLAY_SIZE = (640, 480)
 
@@ -25,6 +26,9 @@ class Camera:
         off_x = min(max(position[0] - self._screen_size[0] // 2, 0), self._canvas_size[0] - self._screen_size[0])
         off_y = min(max(position[1] - self._screen_size[1] // 2, 0), self._canvas_size[1] - self._screen_size[1])
         self._canvas_offset = (-off_x, -off_y)
+
+    def get_position(self):
+        return -self._canvas_offset[0] + self._screen_size[0] // 2, -self._canvas_offset[1] + self._screen_size[1] // 2
 
     def get_canvas_offset(self):
         return self._canvas_offset
@@ -66,24 +70,39 @@ class GameWorldTile:
 
 class GameWorld:
 
-    def __init__(self, map_image_path):
+    def __init__(self, map_image_path, screen_size):
         map_image = Image.open(map_image_path)
         self._size = map_image.size
         self._tiles = [[None] * self._size[1] for _ in range(self._size[0])]
-        self._tile_sprite_group = pygame.sprite.Group()
+        scr_sz_t = (math.ceil(screen_size[0] / WORLD_TILE_SIZE), math.ceil(screen_size[1] / WORLD_TILE_SIZE))
+        self._tile_chunks = [[pygame.sprite.Group() for __ in range(math.ceil(self._size[1] / scr_sz_t[1]))]
+                             for _ in range(math.ceil(self._size[0] / scr_sz_t[0]))]
+        self._chunk_size_tiles = scr_sz_t
         self._player_position = (0, 0)
         for x, y in product(*map(range, self._size)):
             tile_color = map_image.getpixel((x, y))
+            tl_chk_xy = (x // scr_sz_t[0], y // scr_sz_t[1])
             if tile_color[0] == tile_color[1] == tile_color[2] == 255:
-                self._tiles[x][y] = GameWorldTile((x, y), 1, self._tile_sprite_group)
+                self._tiles[x][y] = GameWorldTile((x, y), 1, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
             elif tile_color[0] == tile_color[1] == tile_color[2] == 0:
-                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_sprite_group)
+                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
             elif tile_color[0] == tile_color[2] == 0 and tile_color[1] == 255:
-                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_sprite_group)
+                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
                 self._player_position = (x * WORLD_TILE_SIZE, y * WORLD_TILE_SIZE)
 
-    def draw(self, surface):
-        self._tile_sprite_group.draw(surface)
+    def _get_chunks_around_pos(self, pos_tiles):
+        ccp = (pos_tiles[0] // self._chunk_size_tiles[0],
+               pos_tiles[1] // self._chunk_size_tiles[1])
+        return [self._tile_chunks[x][y] for x, y in product(range(ccp[0] - 1, ccp[0] + 2),
+                                                            range(ccp[1] - 1, ccp[1] + 2))
+                if not (y >= len(self._tile_chunks[x]) or y < 0 or x >= len(self._tile_chunks) or x < 0)]
+
+    def draw(self, camera, surface):
+        camera_pos = camera.get_position()
+        chunks_around_camera = self._get_chunks_around_pos((camera_pos[0] // WORLD_TILE_SIZE,
+                                                            camera_pos[1] // WORLD_TILE_SIZE))
+        for chunk in chunks_around_camera:
+            chunk.draw(surface)
 
     def get_player_position(self):
         return self._player_position
@@ -115,7 +134,7 @@ def setup():
 
     dynamic_sprite_group = pygame.sprite.Group()
 
-    world = GameWorld(os.path.join('resources', WORLD_MAP_NAME))
+    world = GameWorld(os.path.join('resources', WORLD_MAP_NAME), DISPLAY_SIZE)
     player = Player(world.get_player_position(), dynamic_sprite_group)
     camera = Camera((world.get_size()[0] * WORLD_TILE_SIZE, world.get_size()[1] * WORLD_TILE_SIZE),
                     DISPLAY_SIZE,
@@ -126,8 +145,6 @@ def setup():
 
 
 def loop(dt, events):
-    global i
-
     for event in events:
         if event.type == pygame.QUIT:
             return False
@@ -143,7 +160,7 @@ def loop(dt, events):
         player.move((-PLAYER_SPEED * dt / 1000, 0))
 
     camera.set_position(player.get_position())
-    world.draw(canvas)
+    world.draw(camera, canvas)
     dynamic_sprite_group.draw(canvas)
     screen.blit(canvas, camera.get_canvas_offset())
     return True
