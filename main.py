@@ -52,6 +52,9 @@ class Player:
     def get_position(self):
         return self._sprite.rect.center
 
+    def get_sprite(self):
+        return self._sprite
+
 
 class GameWorldTile:
 
@@ -63,6 +66,9 @@ class GameWorldTile:
         self._sprite.rect = self._sprite.image.get_rect(center=(int((world_position[0] + 0.5) * WORLD_TILE_SIZE),
                                                                 int((world_position[1] + 0.5) * WORLD_TILE_SIZE)))
         sprite_group.add(self._sprite)
+
+    def get_sprite(self):
+        return self._sprite
 
     def get_type(self):
         return self._type
@@ -90,12 +96,41 @@ class GameWorld:
                 self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
                 self._player_position = (x * WORLD_TILE_SIZE, y * WORLD_TILE_SIZE)
 
+    def _is_correct_chunk_coords(self, x, y):
+        return not (y >= len(self._tile_chunks[x]) or y < 0 or x >= len(self._tile_chunks) or x < 0)
+
+    def _is_correct_tile_coords(self, x, y):
+        return not (x < 0 or x >= self._size[0] or y < 0 or y >= self._size[1])
+
     def _get_chunks_around_pos(self, pos_tiles):
         ccp = (pos_tiles[0] // self._chunk_size_tiles[0],
                pos_tiles[1] // self._chunk_size_tiles[1])
         return [self._tile_chunks[x][y] for x, y in product(range(ccp[0] - 1, ccp[0] + 2),
                                                             range(ccp[1] - 1, ccp[1] + 2))
-                if not (y >= len(self._tile_chunks[x]) or y < 0 or x >= len(self._tile_chunks) or x < 0)]
+                if self._is_correct_chunk_coords(x, y)]
+
+    def check_collisions_and_fix_move_vector(self, entity_sprite, entity_move):
+        result_move = [0, 0]
+        start_pos = entity_sprite.rect.center
+        start_pos_tiles = start_pos[0] // WORLD_TILE_SIZE, start_pos[1] // WORLD_TILE_SIZE
+        entity_sprite.rect.move_ip(entity_move[0], 0)
+        for x, y in product(range(start_pos_tiles[0] - 1, start_pos_tiles[0] + 2),
+                            range(start_pos_tiles[1] - 1, start_pos_tiles[1] + 2)):
+            if self._is_correct_tile_coords(x, y) and self._tiles[x][y].get_type() == 1:
+                if pygame.sprite.collide_rect(entity_sprite, self._tiles[x][y].get_sprite()):
+                    break
+        else:
+            result_move[0] = entity_move[0]
+        entity_sprite.rect.move_ip(0, entity_move[1])
+        for x, y in product(range(start_pos_tiles[0] - 1, start_pos_tiles[0] + 2),
+                            range(start_pos_tiles[1] - 1, start_pos_tiles[1] + 2)):
+            if self._is_correct_tile_coords(x, y) and self._tiles[x][y].get_type() == 1:
+                if pygame.sprite.collide_rect(entity_sprite, self._tiles[x][y].get_sprite()):
+                    break
+        else:
+            result_move[1] = entity_move[1]
+        entity_sprite.rect.center = start_pos
+        return tuple(result_move)
 
     def draw(self, camera, surface):
         camera_pos = camera.get_position()
@@ -151,13 +186,17 @@ def loop(dt, events):
 
     keys_pressed = pygame.key.get_pressed()
     if keys_pressed[pygame.K_w]:
-        player.move((0, -PLAYER_SPEED * dt / 1000))
+        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (0, -PLAYER_SPEED * dt / 1000))
+        player.move(move_vector)
     elif keys_pressed[pygame.K_s]:
-        player.move((0, PLAYER_SPEED * dt / 1000))
+        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (0, PLAYER_SPEED * dt / 1000))
+        player.move(move_vector)
     if keys_pressed[pygame.K_d]:
-        player.move((PLAYER_SPEED * dt / 1000, 0))
+        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (PLAYER_SPEED * dt / 1000, 0))
+        player.move(move_vector)
     elif keys_pressed[pygame.K_a]:
-        player.move((-PLAYER_SPEED * dt / 1000, 0))
+        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (-PLAYER_SPEED * dt / 1000, 0))
+        player.move(move_vector)
 
     camera.set_position(player.get_position())
     world.draw(camera, canvas)
