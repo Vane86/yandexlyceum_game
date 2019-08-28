@@ -14,6 +14,21 @@ PLAYER_SPRITE_SIZE = 32
 PLAYER_SPEED = 3 * WORLD_TILE_SIZE  # pixels per second
 
 
+class FPSCounter:
+
+    def __init__(self):
+        self._frames = 0
+        self._time_passed = 0
+
+    def update(self, dt):
+        self._time_passed += dt
+        self._frames += 1
+        if self._time_passed >= 1000:
+            self._time_passed = 0
+            print(f'FPS: {self._frames}')
+            self._frames = 0
+
+
 class Camera:
 
     def __init__(self, canvas_size, screen_size, position):
@@ -25,35 +40,44 @@ class Camera:
     def set_position(self, position):
         off_x = min(max(position[0] - self._screen_size[0] // 2, 0), self._canvas_size[0] - self._screen_size[0])
         off_y = min(max(position[1] - self._screen_size[1] // 2, 0), self._canvas_size[1] - self._screen_size[1])
-        self._canvas_offset = (-off_x, -off_y)
+        self._canvas_offset = (off_x, off_y)
 
     def get_position(self):
-        return -self._canvas_offset[0] + self._screen_size[0] // 2, -self._canvas_offset[1] + self._screen_size[1] // 2
+        return self._canvas_offset[0] + self._screen_size[0] // 2, self._canvas_offset[1] + self._screen_size[1] // 2
 
     def get_canvas_offset(self):
         return self._canvas_offset
 
 
-class Player:
+class Entity:
 
     def __init__(self, position, sprite_group):
         self._sprite = pygame.sprite.Sprite()
         self._sprite.image = pygame.image.load(os.path.join('resources', 'textures', 'player.png'))
         self._sprite.image = pygame.transform.scale(self._sprite.image, (PLAYER_SPRITE_SIZE, PLAYER_SPRITE_SIZE))
         self._sprite.rect = self._sprite.image.get_rect(center=(position[0], position[1]))
+        self._position = position
         sprite_group.add(self._sprite)
 
     def set_position(self, position):
         self._sprite.rect.center = position
+        self._position = position
 
     def move(self, delta):
-        self._sprite.rect.move_ip(*delta)
+        self._position = tuple(map(lambda x: x[0] + x[1], zip(self._position, delta)))
+        self._sprite.rect.center = tuple(map(round, self._position))
 
     def get_position(self):
         return self._sprite.rect.center
 
     def get_sprite(self):
         return self._sprite
+
+
+class Player(Entity):
+
+    def __init__(self, position, sprite_group):
+        super().__init__(position, sprite_group)
 
 
 class GameWorldTile:
@@ -109,35 +133,39 @@ class GameWorld:
                                                             range(ccp[1] - 1, ccp[1] + 2))
                 if self._is_correct_chunk_coords(x, y)]
 
-    def check_collisions_and_fix_move_vector(self, entity_sprite, entity_move):
+    def check_collisions_and_fix_move_vector(self, entity, entity_move):
         result_move = [0, 0]
-        start_pos = entity_sprite.rect.center
+        start_pos = entity.get_sprite().rect.center
         start_pos_tiles = start_pos[0] // WORLD_TILE_SIZE, start_pos[1] // WORLD_TILE_SIZE
-        entity_sprite.rect.move_ip(entity_move[0], 0)
+        entity.move((entity_move[0], 0))
         for x, y in product(range(start_pos_tiles[0] - 1, start_pos_tiles[0] + 2),
                             range(start_pos_tiles[1] - 1, start_pos_tiles[1] + 2)):
             if self._is_correct_tile_coords(x, y) and self._tiles[x][y].get_type() == 1:
-                if pygame.sprite.collide_rect(entity_sprite, self._tiles[x][y].get_sprite()):
+                if pygame.sprite.collide_rect(entity.get_sprite(), self._tiles[x][y].get_sprite()):
                     break
         else:
             result_move[0] = entity_move[0]
-        entity_sprite.rect.move_ip(0, entity_move[1])
+        entity.move((0, entity_move[1]))
         for x, y in product(range(start_pos_tiles[0] - 1, start_pos_tiles[0] + 2),
                             range(start_pos_tiles[1] - 1, start_pos_tiles[1] + 2)):
             if self._is_correct_tile_coords(x, y) and self._tiles[x][y].get_type() == 1:
-                if pygame.sprite.collide_rect(entity_sprite, self._tiles[x][y].get_sprite()):
+                if pygame.sprite.collide_rect(entity.get_sprite(), self._tiles[x][y].get_sprite()):
                     break
         else:
             result_move[1] = entity_move[1]
-        entity_sprite.rect.center = start_pos
+        entity.set_position(start_pos)
         return tuple(result_move)
 
     def draw(self, camera, surface):
         camera_pos = camera.get_position()
         chunks_around_camera = self._get_chunks_around_pos((camera_pos[0] // WORLD_TILE_SIZE,
                                                             camera_pos[1] // WORLD_TILE_SIZE))
+        draw_group = pygame.sprite.Group()
         for chunk in chunks_around_camera:
-            chunk.draw(surface)
+            for sprite in chunk.sprites():
+                if sprite.rect.colliderect(pygame.Rect((*camera.get_canvas_offset(), *DISPLAY_SIZE))):
+                    draw_group.add(sprite)
+        draw_group.draw(surface)
 
     def get_player_position(self):
         return self._player_position
@@ -150,6 +178,7 @@ class GameWorld:
 
 
 screen = None
+fps_counter = None
 
 dynamic_sprite_group = None
 
@@ -162,10 +191,11 @@ camera = None
 
 
 def setup():
-    global screen, world, canvas, camera, player, dynamic_sprite_group
+    global screen, fps_counter, world, canvas, camera, player, dynamic_sprite_group
 
     pygame.init()
     screen = pygame.display.set_mode(DISPLAY_SIZE)
+    fps_counter = FPSCounter()
 
     dynamic_sprite_group = pygame.sprite.Group()
 
@@ -186,22 +216,22 @@ def loop(dt, events):
 
     keys_pressed = pygame.key.get_pressed()
     if keys_pressed[pygame.K_w]:
-        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (0, -PLAYER_SPEED * dt / 1000))
+        move_vector = world.check_collisions_and_fix_move_vector(player, (0, -PLAYER_SPEED * dt / 1000))
         player.move(move_vector)
     elif keys_pressed[pygame.K_s]:
-        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (0, PLAYER_SPEED * dt / 1000))
+        move_vector = world.check_collisions_and_fix_move_vector(player, (0, PLAYER_SPEED * dt / 1000))
         player.move(move_vector)
     if keys_pressed[pygame.K_d]:
-        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (PLAYER_SPEED * dt / 1000, 0))
+        move_vector = world.check_collisions_and_fix_move_vector(player, (PLAYER_SPEED * dt / 1000, 0))
         player.move(move_vector)
     elif keys_pressed[pygame.K_a]:
-        move_vector = world.check_collisions_and_fix_move_vector(player.get_sprite(), (-PLAYER_SPEED * dt / 1000, 0))
+        move_vector = world.check_collisions_and_fix_move_vector(player, (-PLAYER_SPEED * dt / 1000, 0))
         player.move(move_vector)
 
     camera.set_position(player.get_position())
     world.draw(camera, canvas)
     dynamic_sprite_group.draw(canvas)
-    screen.blit(canvas, camera.get_canvas_offset())
+    screen.blit(canvas, (0, 0), pygame.Rect((*camera.get_canvas_offset(), *DISPLAY_SIZE)))
     return True
 
 
@@ -216,6 +246,7 @@ clock = pygame.time.Clock()
 while True:
 
     dt = clock.tick()
+    fps_counter.update(dt)
     events = pygame.event.get()
 
     if not loop(dt, events):
