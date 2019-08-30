@@ -13,6 +13,8 @@ WORLD_TILE_SIZE = 32
 PLAYER_SPRITE_SIZE = 32
 PLAYER_SPEED = 3 * WORLD_TILE_SIZE  # pixels per second
 
+LIGHT_SOURCE_RADIUS = 7  # world tiles
+
 
 class FPSCounter:
 
@@ -49,6 +51,28 @@ class Camera:
         return self._canvas_offset
 
 
+class LightSource:
+
+    def __init__(self, position):
+        self._old_position = position
+        self._new_position = position
+
+    def set_position(self, position):
+        self._new_position = position
+
+    def move(self, delta):
+        self._new_position = self._new_position[0] + delta[0], self._new_position[1] + delta[1]
+
+    def update(self):
+        self._old_position = self._new_position
+
+    def get_new_position(self):
+        return self._new_position
+
+    def get_old_position(self):
+        return self._old_position
+
+
 class Entity:
 
     def __init__(self, position, sprite_group):
@@ -78,18 +102,42 @@ class Player(Entity):
 
     def __init__(self, position, sprite_group):
         super().__init__(position, sprite_group)
+        self._light_source = LightSource(position)
+
+    def set_position(self, position):
+        super().set_position(position)
+        self._light_source.set_position(position)
+
+    def move(self, delta):
+        super().move(delta)
+        self._light_source.move(delta)
+
+    def get_light_source(self):
+        return self._light_source
 
 
 class GameWorldTile:
 
-    def __init__(self, world_position, type, sprite_group):  # types: 0 - floor, 1 - wall
+    def __init__(self, world_position, type, darkness=1.0):  # types: 0 - floor, 1 - wall
         self._type = type
         self._sprite = pygame.sprite.Sprite()
         self._sprite.image = pygame.image.load(os.path.join('resources', 'textures', 'tile' + str(type) + '.png'))
         self._sprite.image = pygame.transform.scale(self._sprite.image, (WORLD_TILE_SIZE, WORLD_TILE_SIZE))
         self._sprite.rect = self._sprite.image.get_rect(center=(int((world_position[0] + 0.5) * WORLD_TILE_SIZE),
                                                                 int((world_position[1] + 0.5) * WORLD_TILE_SIZE)))
-        sprite_group.add(self._sprite)
+        self._darkness = darkness
+
+        self._surface_to_draw = pygame.Surface((WORLD_TILE_SIZE, WORLD_TILE_SIZE))
+        self._surface_to_draw.fill((0, 0, 0))
+        self._surface_to_draw.set_alpha(round(self._darkness * 25))
+
+    def draw_light_mask(self, surface):
+        self._surface_to_draw.set_alpha(round(self._darkness * 255))
+        pos = self._sprite.rect.center[0] - WORLD_TILE_SIZE // 2, self._sprite.rect.center[1] - WORLD_TILE_SIZE // 2
+        surface.blit(self._surface_to_draw, pos)
+
+    def set_darkness(self, darkness):
+        self._darkness = darkness
 
     def get_sprite(self):
         return self._sprite
@@ -105,7 +153,7 @@ class GameWorld:
         self._size = map_image.size
         self._tiles = [[None] * self._size[1] for _ in range(self._size[0])]
         scr_sz_t = (math.ceil(screen_size[0] / WORLD_TILE_SIZE), math.ceil(screen_size[1] / WORLD_TILE_SIZE))
-        self._tile_chunks = [[pygame.sprite.Group() for __ in range(math.ceil(self._size[1] / scr_sz_t[1]))]
+        self._tile_chunks = [[list() for __ in range(math.ceil(self._size[1] / scr_sz_t[1]))]
                              for _ in range(math.ceil(self._size[0] / scr_sz_t[0]))]
         self._chunk_size_tiles = scr_sz_t
         self._player_position = (0, 0)
@@ -113,12 +161,17 @@ class GameWorld:
             tile_color = map_image.getpixel((x, y))
             tl_chk_xy = (x // scr_sz_t[0], y // scr_sz_t[1])
             if tile_color[0] == tile_color[1] == tile_color[2] == 255:
-                self._tiles[x][y] = GameWorldTile((x, y), 1, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
+                self._tiles[x][y] = GameWorldTile((x, y), 1)
+                self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]].append(self._tiles[x][y])
             elif tile_color[0] == tile_color[1] == tile_color[2] == 0:
-                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
+                self._tiles[x][y] = GameWorldTile((x, y), 0)
+                self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]].append(self._tiles[x][y])
             elif tile_color[0] == tile_color[2] == 0 and tile_color[1] == 255:
-                self._tiles[x][y] = GameWorldTile((x, y), 0, self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]])
+                self._tiles[x][y] = GameWorldTile((x, y), 0)
+                self._tile_chunks[tl_chk_xy[0]][tl_chk_xy[1]].append(self._tiles[x][y])
                 self._player_position = (x * WORLD_TILE_SIZE, y * WORLD_TILE_SIZE)
+        self._light_sources = list()
+        print(list(map(lambda x: (x.get_sprite().rect.center[0] // WORLD_TILE_SIZE, x.get_sprite().rect.center[1] // WORLD_TILE_SIZE), self._get_tiles_between((10, 10), (20, 20)))))
 
     def _is_correct_chunk_coords(self, x, y):
         return not (y >= len(self._tile_chunks[x]) or y < 0 or x >= len(self._tile_chunks) or x < 0)
@@ -156,16 +209,62 @@ class GameWorld:
         entity.set_position(start_pos)
         return tuple(result_move)
 
+    def add_light_source(self, source):
+        self._light_sources.append(source)
+
+    def _get_tiles_between(self, pos1, pos2):
+        dx, dy = pos1[0] - pos2[0], pos1[1] - pos2[1]
+        L = max(abs(dx), abs(dy))
+        if not L:
+            return list()
+        dx, dy = dx / L, dy / L
+        result = list()
+        x, y = pos2
+        for i in range(L):
+            if self._is_correct_tile_coords(x, y):
+                result.append(self._tiles[round(x)][round(y)])
+            x, y = x + dx, y + dy
+        return result
+
+    def _calculate_light_from_source(self, source):
+        op = source.get_old_position()
+        owp = int(op[0] // WORLD_TILE_SIZE), int(op[1] // WORLD_TILE_SIZE)
+        for x, y in product(range(owp[0] - LIGHT_SOURCE_RADIUS, owp[0] + LIGHT_SOURCE_RADIUS + 1),
+                            range(owp[1] - LIGHT_SOURCE_RADIUS, owp[1] + LIGHT_SOURCE_RADIUS + 1)):
+            if not self._is_correct_tile_coords(x, y):
+                continue
+            self._tiles[x][y].set_darkness(1.0)
+        np = source.get_new_position()
+        nwp = int(np[0] // WORLD_TILE_SIZE), int(np[1] // WORLD_TILE_SIZE)
+        for x, y in product(range(nwp[0] - LIGHT_SOURCE_RADIUS, nwp[0] + LIGHT_SOURCE_RADIUS + 1),
+                            range(nwp[1] - LIGHT_SOURCE_RADIUS, nwp[1] + LIGHT_SOURCE_RADIUS + 1)):
+            if not self._is_correct_tile_coords(x, y):
+                continue
+            if any(map(lambda z: z.get_type(), self._get_tiles_between((x, y), nwp))):
+                continue
+            dist = ((x - nwp[0]) ** 2 + (y - nwp[1]) ** 2) ** 0.5
+            lightness = max(0.0, min(2 / (dist + 0.001) - 2 / LIGHT_SOURCE_RADIUS, 1.0))
+            self._tiles[x][y].set_darkness(1 - lightness)
+        source.update()
+
     def draw(self, camera, surface):
         camera_pos = camera.get_position()
         chunks_around_camera = self._get_chunks_around_pos((camera_pos[0] // WORLD_TILE_SIZE,
                                                             camera_pos[1] // WORLD_TILE_SIZE))
         draw_group = pygame.sprite.Group()
+        light_draw_list = list()
         for chunk in chunks_around_camera:
-            for sprite in chunk.sprites():
-                if sprite.rect.colliderect(pygame.Rect((*camera.get_canvas_offset(), *DISPLAY_SIZE))):
-                    draw_group.add(sprite)
+            for tile in chunk:
+                if tile.get_sprite().rect.colliderect(pygame.Rect((*camera.get_canvas_offset(), *DISPLAY_SIZE))):
+                    draw_group.add(tile.get_sprite())
+                    light_draw_list.append(tile)
         draw_group.draw(surface)
+
+        for source in self._light_sources:
+            self._calculate_light_from_source(source)
+
+        for tile in light_draw_list:
+            tile.draw_light_mask(surface)
 
     def get_player_position(self):
         return self._player_position
@@ -201,12 +300,12 @@ def setup():
 
     world = GameWorld(os.path.join('resources', WORLD_MAP_NAME), DISPLAY_SIZE)
     player = Player(world.get_player_position(), dynamic_sprite_group)
+    world.add_light_source(player.get_light_source())
     camera = Camera((world.get_size()[0] * WORLD_TILE_SIZE, world.get_size()[1] * WORLD_TILE_SIZE),
                     DISPLAY_SIZE,
                     player.get_position())
 
     canvas = pygame.Surface((world.get_size()[0] * WORLD_TILE_SIZE, world.get_size()[1] * WORLD_TILE_SIZE))
-    pass
 
 
 def loop(dt, events):
